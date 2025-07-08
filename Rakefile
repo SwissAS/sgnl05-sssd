@@ -1,61 +1,114 @@
+# frozen_string_literal: true
+
+require 'bundler'
+require 'puppet_litmus/rake_tasks' if Bundler.rubygems.find_name('puppet_litmus').any?
 require 'puppetlabs_spec_helper/rake_tasks'
-require 'puppet-lint/tasks/puppet-lint'
 require 'puppet-syntax/tasks/puppet-syntax'
-require 'metadata-json-lint/rake_task'
+require 'puppet_blacksmith/rake_tasks' if Bundler.rubygems.find_name('puppet-blacksmith').any?
+require 'github_changelog_generator/task' if Bundler.rubygems.find_name('github_changelog_generator').any?
+require 'puppet-strings/tasks' if Bundler.rubygems.find_name('puppet-strings').any?
 
-exclude_paths = [
-  'modules/**/*',
-  'pkg/**/*',
-  'spec/**/*',
-  'vendor/**/*'
-]
+def changelog_user
+  return unless Rake.application.top_level_tasks.include? "changelog"
+  returnVal = nil || JSON.load(File.read('metadata.json'))['author']
+  raise "unable to find the changelog_user in .sync.yml, or the author in metadata.json" if returnVal.nil?
+  puts "GitHubChangelogGenerator user:#{returnVal}"
+  returnVal
+end
 
-PuppetLint.configuration.fail_on_warnings = true
-PuppetLint.configuration.relative = true
+def changelog_project
+  return unless Rake.application.top_level_tasks.include? "changelog"
+
+  returnVal = nil
+  returnVal ||= begin
+    metadata_source = JSON.load(File.read('metadata.json'))['source']
+    metadata_source_match = metadata_source && metadata_source.match(%r{.*\/([^\/]*?)(?:\.git)?\Z})
+
+    metadata_source_match && metadata_source_match[1]
+  end
+
+  raise "unable to find the changelog_project in .sync.yml or calculate it from the source in metadata.json" if returnVal.nil?
+
+  puts "GitHubChangelogGenerator project:#{returnVal}"
+  returnVal
+end
+
+def changelog_future_release
+  return unless Rake.application.top_level_tasks.include? "changelog"
+  returnVal = "v%s" % JSON.load(File.read('metadata.json'))['version']
+  raise "unable to find the future_release (version) in metadata.json" if returnVal.nil?
+  puts "GitHubChangelogGenerator future_release:#{returnVal}"
+  returnVal
+end
+
+# disabled checks
+PuppetLint.configuration.send('disable_relative')
 PuppetLint.configuration.send('disable_80chars')
 PuppetLint.configuration.send('disable_140chars')
-PuppetLint.configuration.ignore_paths = exclude_paths
-PuppetSyntax.exclude_paths = exclude_paths
+PuppetLint.configuration.send('disable_class_inherits_from_params_class')
+PuppetLint.configuration.send('disable_autoloader_layout')
+PuppetLint.configuration.send('disable_documentation')
+PuppetLint.configuration.send('disable_single_quote_string_with_variables')
+PuppetLint.configuration.send('disable_manifest_whitespace_opening_brace_after')
+PuppetLint.configuration.send('disable_manifest_whitespace_opening_brace_before')
+PuppetLint.configuration.send('disable_manifest_whitespace_closing_brace_after')
+PuppetLint.configuration.send('disable_manifest_whitespace_closing_brace_before')
+PuppetLint.configuration.send('disable_manifest_whitespace_opening_bracket_after')
+PuppetLint.configuration.send('disable_manifest_whitespace_opening_bracket_before')
+PuppetLint.configuration.send('disable_manifest_whitespace_closing_bracket_after')
+PuppetLint.configuration.send('disable_manifest_whitespace_closing_bracket_before')
+PuppetLint.configuration.send('disable_manifest_whitespace_two_empty_lines')
+PuppetLint.configuration.send('disable_manifest_whitespace_arrows_single_space_after')
+PuppetLint.configuration.send('disable_manifest_whitespace_class_name_single_space_after')
+PuppetLint.configuration.send('disable_manifest_whitespace_newline_beginning_of_file')
+PuppetLint.configuration.send('disable_trailing_comma')
+PuppetLint.configuration.send('disable_relative_classname_inclusion')
 
-Rake::Task[:default].prerequisites.clear
-task :default => :all
+# do not fail job if checks are flagged as warnings
+PuppetLint.configuration.fail_on_warnings = false
 
-desc 'Run acceptance tests'
-RSpec::Core::RakeTask.new(:acceptance) do |t|
-  t.pattern = 'spec/acceptance'
-end
+PuppetLint.configuration.ignore_paths = [".vendor/**/*.pp", ".bundle/**/*.pp", "pkg/**/*.pp", "spec/**/*.pp", "tests/**/*.pp", "types/**/*.pp", "vendor/**/*.pp"]
 
-desc 'Clean up modules / pkg'
-task :clean do
-  sh 'rm -rf modules pkg spec/fixtures'
-end
 
-task :success do
-  puts "\n\e[32mAll tests passing...\e[0m"
-end
-
-# Puppet Strings (Documentation generation from inline comments)
-# See: https://github.com/puppetlabs/puppet-strings#rake-tasks
-require 'puppet-strings/tasks'
-
-desc 'Alias for strings:generate'
-task :doc => ['strings:generate']
-
-desc 'Generate REFERENCE.md'
-task :reference do
-  sh 'puppet strings generate --format markdown'
-end
-
-desc 'Run all'
-task :all => [
-  :clean,
-  :test,
-  :success
-]
-
-desc 'Run validate, lint and spec tests.'
-task :test do
-  [:lint, :validate, :syntax, :spec, :doc, :reference].each do |test|
-    Rake::Task[test].invoke
+if Bundler.rubygems.find_name('github_changelog_generator').any?
+  GitHubChangelogGenerator::RakeTask.new :changelog do |config|
+    raise "Set CHANGELOG_GITHUB_TOKEN environment variable eg 'export CHANGELOG_GITHUB_TOKEN=valid_token_here'" if Rake.application.top_level_tasks.include? "changelog" and ENV['CHANGELOG_GITHUB_TOKEN'].nil?
+    config.user = "#{changelog_user}"
+    config.project = "#{changelog_project}"
+    config.future_release = "#{changelog_future_release}"
+    config.exclude_labels = ['maintenance']
+    config.header = "# Change log\n\nAll notable changes to this project will be documented in this file. The format is based on [Keep a Changelog](http://keepachangelog.com/en/1.0.0/) and this project adheres to [Semantic Versioning](http://semver.org)."
+    config.add_pr_wo_labels = true
+    config.issues = false
+    config.merge_prefix = "### UNCATEGORIZED PRS; LABEL THEM ON GITHUB"
+    config.configure_sections = {
+      "Changed" => {
+        "prefix" => "### Changed",
+        "labels" => ["backwards-incompatible"],
+      },
+      "Added" => {
+        "prefix" => "### Added",
+        "labels" => ["enhancement", "feature"],
+      },
+      "Fixed" => {
+        "prefix" => "### Fixed",
+        "labels" => ["bug", "documentation", "bugfix"],
+      },
+    }
+  end
+else
+  desc 'Generate a Changelog from GitHub'
+  task :changelog do
+    raise <<EOM
+The changelog tasks depends on recent features of the github_changelog_generator gem.
+Please manually add it to your .sync.yml for now, and run `pdk update`:
+---
+Gemfile:
+  optional:
+    ':development':
+      - gem: 'github_changelog_generator'
+        version: '~> 1.15'
+        condition: "Gem::Version.new(RUBY_VERSION.dup) >= Gem::Version.new('2.3.0')"
+EOM
   end
 end
